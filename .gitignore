@@ -1,0 +1,15 @@
+# Data and output files
+dataset/
+output/
+*.tsv
+*.csv
+*.tar.gz
+*.pkl
+
+# Python environment
+__pycache__/
+*.pyc
+.env
+venv/
+.vscode/
+.idea/
