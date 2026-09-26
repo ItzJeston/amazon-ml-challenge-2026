@@ -211,11 +211,6 @@ def extract_train_features(
     negatives = cands_df[cands_df['label'] == 0]
 
     # For each S1 entity keep at most max_neg negatives
-    neg_sampled = (
-        negatives.groupby('source1_entity_id', group_keys=False)
-        .apply(lambda g: g.sample(n=min(max_neg, len(g)), random_state=42))
-    )
-    # pandas 3.0 safe reset
     neg_sampled = pd.concat(
         [grp.sample(n=min(max_neg, len(grp)), random_state=42)
          for _, grp in negatives.groupby('source1_entity_id')],

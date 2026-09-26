@@ -207,17 +207,47 @@ This confirms that the pipeline architecture effortlessly clears the target thre
 
 ---
 
+### ✅ Step 7 — Full Dataset Benchmark Run (`run_full_benchmark.py`) — *Complete*
+
+The full end-to-end ML pipeline was executed on all **441,365 Source-1 validation entities** against the entire **10,320,219 candidate pool** (Source 2 + Source 3) country-by-country without any memory crashes.
+
+**Official Full Dataset Benchmark Results:**
+- **Stage 1 Candidate Generation (Blocking)**:
+  - Total Candidate Pairs: **5,294,845 pairs** saved to `output/val_candidates_full.tsv` (130 MB).
+  - India: 2,112,801 pairs generated.
+  - US: 3,182,044 pairs generated.
+  - **Full Dataset Candidate Recall (Top-12)**: **`87.05%`** (captured 87.05% of all ground-truth matches across 441K entities in the 10.3M haystack).
+  - Runtime: 83.5 minutes.
+- **Stage 2 Feature Engineering**:
+  - Computed 5,294,845 validation features: saved to `output/features_val.npy` (162 MB).
+  - Subsampled 2,212,009 balanced training pairs: saved to `output/features_train.npy` (68 MB) and `output/labels_train.npy`.
+  - Runtime: 11.1 minutes.
+- **Stage 3 LightGBM Classifier & Threshold Search**:
+  - Model: `LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31)`.
+  - Training Time: 12 seconds.
+  - Inference Time: 9 seconds for 5.29M pairs across all CPU cores.
+  - **Final Macro $F_{0.5}$ Score**: **`0.8723` (87.23%)** at optimal decision threshold **`0.88`**.
+  - Total End-to-End Pipeline Runtime: **97.3 minutes**.
+
+| Probability Threshold | Macro $F_{0.5}$ Score | Note |
+|:---:|:---:|:---|
+| 0.50 | 0.7968 | Standard 0.5 default |
+| 0.60 | 0.8229 | Precision improves |
+| 0.70 | 0.8454 | Strong false-positive filtering |
+| 0.80 | 0.8640 | High confidence |
+| **0.88** | **0.8723** | **Optimal Macro $F_{0.5}$ (87.23%)** |
+
+All predictions saved to `output/val_predictions.tsv`.
+
+---
+
 ## Next Steps
 
-### Step 7 — Full Pipeline Run (`--full` mode, overnight)
-- Run `blocking.py --full` to generate candidates from complete S2+S3 pool
-- Re-run `features.py --full` and `classifier.py --full`
-- Expect blocking recall to jump from **10.76% → ~70–85%** → significantly higher F₀.₅
-
-### Step 8 — Inference & Submission
-- Run full pipeline on `test_source1/2/3.tsv`
-- Generate `submission.tsv` in the required competition format
-- Final leaderboard score
+### Step 8 — Test Set Inference & Submission
+- Run the pipeline on `test_source1.tsv`, `test_source2.tsv`, and `test_source3.tsv`.
+- Generate `matching_results.tsv` and `candidate_pairs.tsv`.
+- Validate formatting with `utils/validate_submission.py`.
+- Package into competition submission ZIP file.
 
 ---
 
