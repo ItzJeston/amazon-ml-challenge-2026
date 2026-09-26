@@ -12,4 +12,6 @@ __pycache__/
 .env
 venv/
 .vscode/
+
 .idea/
+6ab10eb3b23ba_student_resource/
