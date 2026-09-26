@@ -241,13 +241,30 @@ All predictions saved to `output/val_predictions.tsv`.
 
 ---
 
-## Next Steps
+### ✅ Step 8 — Official Test Set Inference & Submission Packaging (`src/test_inference.py`) — *Complete*
 
-### Step 8 — Test Set Inference & Submission
-- Run the pipeline on `test_source1.tsv`, `test_source2.tsv`, and `test_source3.tsv`.
-- Generate `matching_results.tsv` and `candidate_pairs.tsv`.
-- Validate formatting with `utils/validate_submission.py`.
-- Package into competition submission ZIP file.
+The official test set inference pipeline was executed end-to-end on all **1,732,544 Source-1 test entities** across **3 countries** (including the newly introduced **France**, alongside India and the US) against the entire test pool of **9,969,589 candidate records** (`test_source2.tsv` + `test_source3.tsv`).
+
+**Test Set Ingestion & Partitioning:**
+- **Discovered Countries**: Dynamically partitioned into `France`, `India`, and `US` with zero manual intervention.
+  - **France**: 259,452 S1 queries vs. 1,434,993 pool records (236,854 unique tokens).
+  - **India**: 809,986 S1 queries vs. 4,717,565 pool records (913,450 unique tokens).
+  - **US**: 663,106 S1 queries vs. 3,817,031 pool records (821,170 unique tokens).
+
+**Execution Summary:**
+- **Candidates Generated**: **20,780,131 candidate pairs** evaluated across 1.73M queries.
+- **Classification & Thresholding**: Applied trained LightGBM model with optimal decision threshold **`0.88`**.
+  - **Matched Entities**: 1,583,450 entities predicted with high-confidence matches.
+  - **Singletons**: 149,094 entities left completely blank (empty tab-delimited column).
+- **Official Integrity Validation (`utils/validate_submission.py`)**:
+  - `matching_results.tsv`: 1,732,544 rows (149,094 empty, 1,583,450 non-empty) — **PASS**
+  - `candidate_pairs.tsv`: 1,732,544 rows (562 empty, 1,731,982 non-empty) — **PASS**
+  - Result: **`PASS — no blocking issues found. Safe to submit.`**
+- **Output Artifacts**:
+  - `output/candidate_pairs.tsv` (277 MB)
+  - `output/matching_results.tsv` (82 MB)
+  - `output/submission.zip` (**153.1 MB** — ready for competition leaderboard upload)
+- **Total Pipeline Execution Time**: **332.7 minutes (~5.5 hours)** without a single OOM spike or crash.
 
 ---
 
