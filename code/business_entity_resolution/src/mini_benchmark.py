@@ -174,11 +174,8 @@ def main():
     log.info("Predicting probabilities and running threshold optimization …")
     test_proba = clf.predict_proba(X_test)[:, 1].astype(np.float32)
 
-    # Apply veto: feature index 12 is veto_flag
-    if X_test.shape[1] > 12:
-        veto_mask = X_test[:, 12] == 1.0
-        test_proba[veto_mask] = 0.0
-        log.info(f"Vetoed {veto_mask.sum():,} candidate pairs ({veto_mask.sum()/len(veto_mask)*100:.1f}%)")
+    # Note: veto_flag is a feature (index 12) the model already learned from.
+    # We do NOT hard-override probabilities — the model handles it.
 
     test_gt = {eid: val_gt[eid] for eid in test_s1_ids}
     thresholds = np.arange(0.50, 0.97, 0.01)

@@ -206,11 +206,8 @@ def main():
             else:
                 proba_chunk = clf.predict_proba(X_chunk)[:, 1].astype(np.float32)
 
-            # Apply veto: if veto_flag == 1, force probability to 0
-            # veto_flag is at index 12 in the 13-feature layout
-            if X_chunk.shape[1] > 12:
-                veto_mask = X_chunk[:, 12] == 1.0
-                proba_chunk[veto_mask] = 0.0
+            # Note: veto_flag is a feature (index 12) the model already learned from.
+            # We do NOT hard-override probabilities — the model handles it.
 
             # Save predictions above threshold for post-processing
             match_mask = proba_chunk >= threshold
