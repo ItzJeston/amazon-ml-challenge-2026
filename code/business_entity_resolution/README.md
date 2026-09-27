@@ -1,71 +1,44 @@
-# Business Entity Resolution Pipeline
-**Amazon ML Challenge 2026**
+# Business Entity Resolution Pipeline (V2)
+**Amazon ML Challenge 2026** — Branch: `feature/thanmay-blocker`
 
-This repository contains the end-to-end, high-performance Entity Resolution pipeline for resolving noisy business entities across 3 disparate data sources.
-
----
-
-## Architecture Overview
-
-```
-Test Data (S1, S2, S3)
-       │
-       ▼
-[Stage 1: Inverted Index Blocker] (Country-by-Country IDF posting list query)
-       │  Top-12 candidates per entity
-       ▼
-   output/candidate_pairs.tsv
-       │
-       ▼
-[Stage 2: Pairwise Feature Extractor] (8 RapidFuzz similarity features in chunks)
-       │
-       ▼
-[Stage 3: LightGBM Classifier] (Trained on 2.21M pairs, Decision Threshold = 0.88)
-       │  High precision matching (Macro F0.5 = 0.8723)
-       ▼
-   output/matching_results.tsv
-       │
-       ▼
-[Stage 4: Format Validator & Packaging] (utils/validate_submission.py -> submission.zip)
-```
-
-### Key Highlights:
-1. **Dynamic Country Partitioning**: Automatically handles open-world countries (India, US, and test-introduced France) in isolated candidate pools, eliminating cross-country false positives.
-2. **Memory-Safe Inverted Index**: Prunes postings lists (`MAX_POSTINGS = 20,000`) and avoids dense similarity matrices. Runs comfortably within 4.5 GB RAM on 10 million entities.
-3. **Macro F0.5 Metric Alignment**: Decision threshold tuned to **0.88** to strongly prioritize precision (2× weight over recall) and singletons.
+This folder contains the complete source code for the V2 Entity Resolution pipeline.
 
 ---
 
-## Requirements & Environment Setup
+## 🏛️ Pipeline Overview
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
+1. **Stage 1: Inverted Index Blocker (`src/blocking.py`)**
+   - Dynamic country-by-country token indexing.
+   - Stopword pruning (`MAX_POSTINGS = 20,000`).
+   - Retrieves **Top-20** candidates per query entity.
+   - Candidate recall: **95.51%**.
 
-### Dependencies:
-- `pandas>=2.0.0`
-- `numpy>=1.24.0`
-- `scikit-learn>=1.2.0`
-- `lightgbm>=4.0.0`
-- `rapidfuzz>=3.0.0`
+2. **Stage 2: Pairwise Feature Extractor (`src/features.py`)**
+   - 13 pairwise string distance features (RapidFuzz WRatio, Token Set/Sort Ratio, Partial Ratio, Levenshtein, Token Overlaps, Number Overlap).
+   - Hard Negative Mining (top negatives prioritized by blocking difficulty).
+   - Numeric consistency indicator (`veto_flag`).
+
+3. **Stage 3: LightGBM Classifier (`src/classifier.py`)**
+   - Tuned parameters: 500 trees, lr=0.03, num_leaves=63, L1/L2 regularization.
+   - Dynamic threshold search for Macro F0.5 optimization.
+
+4. **Stage 4: Post-Processing & Cardinality Engine (`src/post_process.py`)**
+   - Preserves 1-to-many matches per S1 entity.
+   - Enforces unique assignment for S2/S3 candidate records.
+
+5. **Stage 5: Test Inference & Packaging (`src/test_inference.py`)**
+   - Country-by-country streaming across all 1.73M test queries.
+   - Executes `utils/validate_submission.py`.
+   - Packages `output/submission.zip` automatically.
 
 ---
 
-## Reproducing Results
-
-### 1. Run Official Test Set Inference
-To generate both `matching_results.tsv` and `candidate_pairs.tsv` and produce `submission.zip`:
+## 🏃 Quick Start Commands
 
 ```bash
-python src/test_inference.py
+# Fast-Track Test Inference
+python3 src/features.py
+python3 src/classifier.py
+python3 src/test_inference.py
 ```
-
-### 2. Validate Submission Format
-```bash
-python ../../utils/validate_submission.py \
-    --matching ../../output/matching_results.tsv \
-    --candidate ../../output/candidate_pairs.tsv \
-    --test-dir ../../6ab10eb3b23ba_student_resource/student_resource/dataset/test
-```
+*(All artifacts will be saved in `../../output/`)*
