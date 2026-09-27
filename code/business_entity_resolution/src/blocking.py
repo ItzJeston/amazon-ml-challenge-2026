@@ -46,7 +46,7 @@ DATA_DIR   = os.path.join(BASE_DIR, '6ab10eb3b23ba_student_resource', 'student_r
 OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
 SPLITS_DIR = OUTPUT_DIR
 
-TOP_K          = 12
+TOP_K          = 20
 CHUNK_SIZE     = 100_000   # rows per chunk when streaming S2/S3
 MAX_POSTINGS   = 20_000    # skip tokens appearing in > this many pool docs
                             # (they're de-facto stopwords with no discriminative

@@ -57,6 +57,7 @@ FEATURE_NAMES  = [
     'len_diff_name',
     'len_diff_addr',
     'blocking_rank',
+    'veto_flag',
 ]
 N_FEATURES = len(FEATURE_NAMES)
 
@@ -112,6 +113,18 @@ def _len_diff(a: str, b: str) -> float:
     return abs(la - lb) / denom
 
 
+def _apply_veto(a: str, b: str) -> float:
+    """
+    Returns 1.0 if both addresses contain numeric tokens but their intersection is empty,
+    forcing a veto. Otherwise returns 0.0.
+    """
+    nums_a = set(re.findall(r'\d+', a))
+    nums_b = set(re.findall(r'\d+', b))
+    if nums_a and nums_b and not (nums_a & nums_b):
+        return 1.0
+    return 0.0
+
+
 def compute_features_batch(
     pairs_df: pd.DataFrame,
     entity_lookup: dict[str, dict],
@@ -146,6 +159,7 @@ def compute_features_batch(
         out[i, 5] = _len_diff(n1, n2)
         out[i, 6] = _len_diff(a1, a2)
         out[i, 7] = float(row.blocking_rank)
+        out[i, 8] = _apply_veto(a1, a2)
 
     return out
 
@@ -210,9 +224,9 @@ def extract_train_features(
     positives = cands_df[cands_df['label'] == 1]
     negatives = cands_df[cands_df['label'] == 0]
 
-    # For each S1 entity keep at most max_neg negatives
+    # Hard Negative Mining: sort by blocking_rank, take top max_neg
     neg_sampled = pd.concat(
-        [grp.sample(n=min(max_neg, len(grp)), random_state=42)
+        [grp.sort_values('blocking_rank').head(max_neg)
          for _, grp in negatives.groupby('source1_entity_id')],
         ignore_index=True,
     )

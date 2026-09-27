@@ -78,6 +78,12 @@ def main():
     del X_train, y_train
     gc.collect()
 
+    predictions_path = os.path.join(OUTPUT_DIR, 'raw_predictions.tsv')
+    if os.path.exists(predictions_path):
+        os.remove(predictions_path)
+    with open(predictions_path, 'w') as f:
+        f.write("source1_entity_id\tcandidate_entity_id\tprobability\n")
+
     # =========================================================================
     # STEP 1: LOAD S1 QUERIES
     # =========================================================================
@@ -91,7 +97,6 @@ def main():
     log.info(f"Discovered Test Countries: {test_countries}")
 
     candidates_dict: dict[str, list[str]] = {}
-    matches_dict: dict[str, list[str]] = {eid: [] for eid in all_s1_ids}
 
     # =========================================================================
     # STEP 2: PROCESS COUNTRY-BY-COUNTRY (BLOCKING + FEATURES + INFERENCE)
@@ -165,13 +170,24 @@ def main():
             chunk_df = pd.DataFrame(chunk_slice, columns=['source1_entity_id', 'candidate_entity_id', 'blocking_rank'])
             
             X_chunk = compute_features_batch(chunk_df, lookup_country)
-            proba_chunk = clf.predict_proba(X_chunk)[:, 1].astype(np.float32)
+            # Support both 8-feature (old) and 9-feature (new) models
+            if clf.n_features_ == 8:
+                proba_chunk = clf.predict_proba(X_chunk[:, :8])[:, 1].astype(np.float32)
+            else:
+                proba_chunk = clf.predict_proba(X_chunk)[:, 1].astype(np.float32)
 
-            # Apply threshold
+            veto_mask = X_chunk[:, 8] == 1.0
+            proba_chunk[veto_mask] = 0.0
+
+            # Filter candidates directly by threshold to save disk space
             match_mask = proba_chunk >= OPTIMAL_THRESHOLD
-            matched_pairs = chunk_df[match_mask]
-            for r in matched_pairs.itertuples(index=False):
-                matches_dict[r.source1_entity_id].append(r.candidate_entity_id)
+            valid_chunk = chunk_df[match_mask].copy()
+            valid_chunk['probability'] = proba_chunk[match_mask]
+            
+            # Append to file
+            valid_chunk[['source1_entity_id', 'candidate_entity_id', 'probability']].to_csv(
+                predictions_path, sep='\t', index=False, mode='a', header=False
+            )
 
             if (start // CHUNK_SIZE) % 5 == 0 or (start + CHUNK_SIZE >= n_pairs):
                 log.info(f"  [{country}] {min(start + CHUNK_SIZE, n_pairs):,} / {n_pairs:,} pairs evaluated")
@@ -197,22 +213,23 @@ def main():
     log.info(f"Candidate pairs saved ({os.path.getsize(candidate_tsv_path) / (1024**2):.1f} MB) ✅")
 
     # 3b. matching_results.tsv (singletons are left completely blank in 2nd column)
-    log.info(f"Writing {matching_tsv_path} …")
-    n_singletons = 0
-    n_matched = 0
-    with open(matching_tsv_path, 'w', encoding='utf-8') as f:
-        f.write("source1_entity_id\tmatched_entity_ids\n")
+    log.info("Running post_process.py to enforce bipartite 1-to-1 matching …")
+    
+    s1_ids_path = os.path.join(OUTPUT_DIR, 's1_ids.txt')
+    with open(s1_ids_path, 'w') as f:
         for s1_id in all_s1_ids:
-            m_list = matches_dict.get(s1_id, [])
-            if m_list:
-                m_str = ','.join(m_list)
-                n_matched += 1
-            else:
-                m_str = ''
-                n_singletons += 1
-            f.write(f"{s1_id}\t{m_str}\n")
-    log.info(f"Matching results saved ({os.path.getsize(matching_tsv_path) / (1024**2):.1f} MB) ✅")
-    log.info(f"Predictions summary: {n_matched:,} entities matched, {n_singletons:,} singletons (blank)")
+            f.write(f"{s1_id}\n")
+            
+    post_process_script = os.path.join(SRC_DIR, 'post_process.py')
+    pp_cmd = [
+        sys.executable, post_process_script,
+        predictions_path, matching_tsv_path, s1_ids_path
+    ]
+    log.info(f"Command: {' '.join(pp_cmd)}")
+    pp_res = subprocess.run(pp_cmd)
+    if pp_res.returncode != 0:
+        log.error("❌ post_process.py failed!")
+        sys.exit(pp_res.returncode)
 
     # =========================================================================
     # STEP 4: RUN OFFICIAL VALIDATION SCRIPT
