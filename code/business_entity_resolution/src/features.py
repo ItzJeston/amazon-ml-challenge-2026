@@ -5,26 +5,31 @@ Amazon Business Entity Resolution Challenge
 For every candidate pair (S1_entity_id, pool_entity_id) produced by blocking.py,
 we compute a fixed-width feature vector of float32 values.
 
-Features:
-  name_token_sort_ratio   — rapidfuzz token sort ratio on business_name   [0–100]
-  name_jaro_winkler       — Jaro-Winkler similarity on business_name       [0–1]
-  address_token_set_ratio — rapidfuzz token set ratio on business_address  [0–100]
-  address_levenshtein     — normalised Levenshtein on business_address     [0–1]
+Features (13 total):
+  name_token_sort_ratio   — rapidfuzz token sort ratio on business_name     [0–100]
+  name_wratio             — rapidfuzz WRatio on business_name               [0–100]
+  name_partial_ratio      — rapidfuzz partial_ratio on business_name        [0–100]
+  address_token_set_ratio — rapidfuzz token set ratio on business_address   [0–100]
+  address_token_sort_ratio— rapidfuzz token sort ratio on business_address  [0–100]
+  address_levenshtein     — normalised Levenshtein on business_address      [0–100]
   number_overlap          — Jaccard of numeric tokens; -1.0 if neither has numbers
-  len_diff_name           — |len(s1_name) − len(pool_name)| / max(len,1)  [0–1]
-  len_diff_addr           — |len(s1_addr) − len(pool_addr)| / max(len,1)  [0–1]
-  blocking_rank           — candidate rank from blocking (1 = best, 12 = worst)
+  len_diff_name           — |len(s1_name) − len(pool_name)| / max(len,1)   [0–1]
+  len_diff_addr           — |len(s1_addr) − len(pool_addr)| / max(len,1)   [0–1]
+  blocking_rank           — candidate rank from blocking (1 = best, 20 = worst)
+  name_token_overlap      — Jaccard similarity of name word tokens          [0–1]
+  addr_token_overlap      — Jaccard similarity of address word tokens       [0–1]
+  veto_flag               — 1.0 if both addrs have numbers with zero overlap
 
 Training negative subsampling:
   Keep ALL ground-truth positive pairs (label=1).
-  For each S1 entity, keep at most MAX_NEG_PER_S1 negatives (label=0).
+  For each S1 entity, keep the top max_neg hardest negatives (by blocking_rank).
   This prevents the training set from ballooning to ~21M rows.
 
 Output files (all in output/):
-  features_train.npy   — float32 array  (N_train, 8)
+  features_train.npy   — float32 array  (N_train, 13)
   labels_train.npy     — int8   array   (N_train,)
   pairs_train.tsv      — TSV with source1_entity_id, candidate_entity_id, label
-  features_val.npy     — float32 array  (N_val, 8)
+  features_val.npy     — float32 array  (N_val, 13)
   pairs_val.tsv        — TSV with source1_entity_id, candidate_entity_id
 """
 
@@ -46,17 +51,21 @@ DATA_DIR   = os.path.join(BASE_DIR, '6ab10eb3b23ba_student_resource',
                           'student_resource', 'dataset', 'train')
 OUTPUT_DIR = os.path.join(BASE_DIR, 'output')
 
-MAX_NEG_PER_S1 = 2        # max non-match candidates to keep per S1 entity
+MAX_NEG_PER_S1 = 5        # max non-match candidates to keep per S1 entity (was 2)
 CHUNK_SIZE     = 50_000   # rows per chunk for feature computation
 FEATURE_NAMES  = [
     'name_token_sort_ratio',
-    'name_jaro_winkler',
+    'name_wratio',
+    'name_partial_ratio',
     'address_token_set_ratio',
+    'address_token_sort_ratio',
     'address_levenshtein',
     'number_overlap',
     'len_diff_name',
     'len_diff_addr',
     'blocking_rank',
+    'name_token_overlap',
+    'addr_token_overlap',
     'veto_flag',
 ]
 N_FEATURES = len(FEATURE_NAMES)
@@ -113,10 +122,22 @@ def _len_diff(a: str, b: str) -> float:
     return abs(la - lb) / denom
 
 
+def _token_jaccard(a: str, b: str) -> float:
+    """Jaccard similarity of word tokens."""
+    toks_a = set(a.split())
+    toks_b = set(b.split())
+    if not toks_a and not toks_b:
+        return 1.0
+    union = toks_a | toks_b
+    if not union:
+        return 1.0
+    return len(toks_a & toks_b) / len(union)
+
+
 def _apply_veto(a: str, b: str) -> float:
     """
     Returns 1.0 if both addresses contain numeric tokens but their intersection is empty,
-    forcing a veto. Otherwise returns 0.0.
+    indicating a likely different physical location. Otherwise returns 0.0.
     """
     nums_a = set(re.findall(r'\d+', a))
     nums_b = set(re.findall(r'\d+', b))
@@ -151,15 +172,19 @@ def compute_features_batch(
         n1, n2 = s1['name'],    cand['name']
         a1, a2 = s1['address'], cand['address']
 
-        out[i, 0] = fuzz.token_sort_ratio(n1, n2)
-        out[i, 1] = fuzz.WRatio(n1, n2) / 100.0   # Jaro-Winkler via WRatio
-        out[i, 2] = fuzz.token_set_ratio(a1, a2)
-        out[i, 3] = _norm_levenshtein(a1, a2) * 100.0  # scale to 0-100 for consistency
-        out[i, 4] = _number_overlap(a1, a2)
-        out[i, 5] = _len_diff(n1, n2)
-        out[i, 6] = _len_diff(a1, a2)
-        out[i, 7] = float(row.blocking_rank)
-        out[i, 8] = _apply_veto(a1, a2)
+        out[i, 0] = fuzz.token_sort_ratio(n1, n2)           # name_token_sort_ratio [0-100]
+        out[i, 1] = fuzz.WRatio(n1, n2)                     # name_wratio [0-100]
+        out[i, 2] = fuzz.partial_ratio(n1, n2)              # name_partial_ratio [0-100]
+        out[i, 3] = fuzz.token_set_ratio(a1, a2)            # address_token_set_ratio [0-100]
+        out[i, 4] = fuzz.token_sort_ratio(a1, a2)           # address_token_sort_ratio [0-100]
+        out[i, 5] = _norm_levenshtein(a1, a2) * 100.0       # address_levenshtein [0-100]
+        out[i, 6] = _number_overlap(a1, a2)                 # number_overlap [-1, 1]
+        out[i, 7] = _len_diff(n1, n2)                       # len_diff_name [0-1]
+        out[i, 8] = _len_diff(a1, a2)                       # len_diff_addr [0-1]
+        out[i, 9] = float(row.blocking_rank)                # blocking_rank [1-20]
+        out[i, 10] = _token_jaccard(n1, n2)                 # name_token_overlap [0-1]
+        out[i, 11] = _token_jaccard(a1, a2)                 # addr_token_overlap [0-1]
+        out[i, 12] = _apply_veto(a1, a2)                    # veto_flag {0, 1}
 
     return out
 
@@ -184,7 +209,7 @@ def build_entity_lookup(dfs: list[pd.DataFrame]) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# Training feature extraction (with negative subsampling)
+# Training feature extraction (with hard negative mining)
 # ---------------------------------------------------------------------------
 
 def extract_train_features(
@@ -194,12 +219,13 @@ def extract_train_features(
     max_neg: int = MAX_NEG_PER_S1,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """
-    Build training features with negative subsampling.
+    Build training features with hard negative mining.
 
     Strategy:
       - Label = 1 for pairs present in gt_dict.
       - Label = 0 for non-matching candidates.
-      - Keep ALL positives; keep at most `max_neg` negatives per S1 entity.
+      - Keep ALL positives; keep the top `max_neg` hardest negatives per S1 entity
+        (those with lowest blocking_rank, i.e., most similar to the query).
 
     Returns:
         (X: float32 array, y: int8 array, pairs_df: DataFrame with pair IDs)
@@ -219,12 +245,13 @@ def extract_train_features(
     log.info("Labelling candidate pairs …")
     cands_df['label'] = cands_df.apply(_label, axis=1)
 
-    # --- Negative subsampling per S1 entity --------------------------------
-    log.info(f"Subsampling negatives (max {max_neg} per S1 entity) …")
+    # --- Hard Negative Mining per S1 entity --------------------------------
+    log.info(f"Hard Negative Mining (top {max_neg} hardest negatives per S1 entity) …")
     positives = cands_df[cands_df['label'] == 1]
     negatives = cands_df[cands_df['label'] == 0]
 
-    # Hard Negative Mining: sort by blocking_rank, take top max_neg
+    # Sort by blocking_rank ascending, take the top max_neg per S1 entity
+    # These are the hardest negatives (most similar to the query)
     neg_sampled = pd.concat(
         [grp.sort_values('blocking_rank').head(max_neg)
          for _, grp in negatives.groupby('source1_entity_id')],
@@ -346,9 +373,8 @@ if __name__ == '__main__':
     log.info(f"Saved features_val.npy  shape={X_val.shape}  "
              f"dtype={X_val.dtype}")
 
-    # ---- 6. Train features (use val candidates as proxy since only quick ------
-    #         mode is done; swap for train candidates once full run completes) --
-    log.info("=== Extracting TRAIN features (from val candidates, demo mode) ===")
+    # ---- 6. Train features -----------------------------------------------
+    log.info("=== Extracting TRAIN features (hard negative mining) ===")
     X_train, y_train, pairs_train = extract_train_features(
         cand_path, gt_dict, lookup
     )

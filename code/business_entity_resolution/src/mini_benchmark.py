@@ -5,8 +5,8 @@ Evaluates the real performance ceiling of the pipeline:
 1. Takes 5,000 Source-1 validation entities.
 2. Builds candidate pool containing ALL their true ground truth partners + 500,000 realistic distractors.
 3. Runs Inverted-Index Blocking -> computes Candidate Recall.
-4. Extracts pairwise RapidFuzz features.
-5. Trains LightGBM & sweeps decision thresholds (0.50 -> 0.88).
+4. Extracts 13 pairwise RapidFuzz features.
+5. Trains LightGBM (tuned) & sweeps decision thresholds (0.50 -> 0.96).
 6. Outputs the true Macro F0.5 score.
 """
 
@@ -30,12 +30,11 @@ log = logging.getLogger(__name__)
 
 sys.path.insert(0, SRC_DIR)
 from metrics import load_ground_truth, compute_macro_f05
-from blocking import clean_text, build_combined_text, tokenize, build_inverted_index, query_index, compute_candidate_recall
-from features import compute_features_batch, _norm_str
+from blocking import clean_text, build_combined_text, tokenize, build_inverted_index, query_index, compute_candidate_recall, TOP_K
+from features import compute_features_batch, _norm_str, MAX_NEG_PER_S1
 
 N_VAL_SAMPLE = 5_000
 N_DISTRACTORS_PER_SOURCE = 250_000   # 250K S2 + 250K S3 = 500K total distractors
-TOP_K = 12
 
 def main():
     t_start = time.time()
@@ -98,7 +97,7 @@ def main():
     log.info(f"Total Benchmark Candidate Pool: {len(pool_df):,} records (contains true partners + ~500K distractors)")
 
     # 4. Run Stage 1: Candidate Generation (Inverted Index)
-    log.info("Running Inverted-Index Blocking …")
+    log.info(f"Running Inverted-Index Blocking (Top-{TOP_K}) …")
     t_block = time.time()
     s1_val = s1_val.copy()
     s1_val['comb_text'] = build_combined_text(s1_val)
@@ -149,10 +148,10 @@ def main():
     train_pairs = pairs_df[pairs_df['source1_entity_id'].isin(train_s1_ids)].copy()
     test_pairs = pairs_df[pairs_df['source1_entity_id'].isin(test_s1_ids)].copy()
 
-    # Subsample negatives for training (keep all positives, max 3 negatives per query)
+    # Hard negative mining for training (keep all positives, top MAX_NEG_PER_S1 hardest negatives per query)
     pos_train = train_pairs[train_pairs['label'] == 1]
     neg_train = train_pairs[train_pairs['label'] == 0]
-    neg_sub = pd.concat([g.sample(n=min(3, len(g)), random_state=42) for _, g in neg_train.groupby('source1_entity_id')], ignore_index=True)
+    neg_sub = pd.concat([g.sort_values('blocking_rank').head(MAX_NEG_PER_S1) for _, g in neg_train.groupby('source1_entity_id')], ignore_index=True)
     balanced_train = pd.concat([pos_train, neg_sub], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
 
     log.info(f"Computing features for {len(balanced_train):,} train pairs and {len(test_pairs):,} test pairs …")
@@ -161,17 +160,28 @@ def main():
 
     X_test = compute_features_batch(test_pairs, lookup)
 
-    # 8. Train LightGBM Classifier
-    log.info("Training LightGBM model …")
-    clf = LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31, random_state=42, verbose=-1, n_jobs=-1)
+    # 8. Train LightGBM Classifier (tuned hyperparameters)
+    log.info("Training LightGBM model (tuned) …")
+    clf = LGBMClassifier(
+        n_estimators=500, learning_rate=0.03, num_leaves=63,
+        min_child_samples=50, subsample=0.8, colsample_bytree=0.8,
+        reg_alpha=0.1, reg_lambda=1.0,
+        random_state=42, verbose=-1, n_jobs=-1
+    )
     clf.fit(X_train, y_train)
 
     # 9. Inference & Threshold Search on the Test Set
     log.info("Predicting probabilities and running threshold optimization …")
     test_proba = clf.predict_proba(X_test)[:, 1].astype(np.float32)
 
+    # Apply veto: feature index 12 is veto_flag
+    if X_test.shape[1] > 12:
+        veto_mask = X_test[:, 12] == 1.0
+        test_proba[veto_mask] = 0.0
+        log.info(f"Vetoed {veto_mask.sum():,} candidate pairs ({veto_mask.sum()/len(veto_mask)*100:.1f}%)")
+
     test_gt = {eid: val_gt[eid] for eid in test_s1_ids}
-    thresholds = np.arange(0.50, 0.92, 0.02)
+    thresholds = np.arange(0.50, 0.97, 0.01)
     best_thresh, best_f05 = 0.50, -1.0
 
     log.info("=" * 60)
@@ -188,7 +198,9 @@ def main():
         if score > best_f05:
             best_f05 = score
             best_thresh = thresh
-        log.info(f"{thresh:<15.2f} {score:<15.4f}")
+        # Print every 5th or the best
+        if int(round(thresh * 100)) % 5 == 0 or abs(thresh - best_thresh) < 0.005:
+            log.info(f"{thresh:<15.2f} {score:<15.4f}")
 
     log.info("=" * 60)
     log.info(f"🏆 BEST MACRO F0.5 SCORE : {best_f05:.4f} ({best_f05*100:.2f}%)")

@@ -6,14 +6,16 @@ End-to-End Test Workflow (Country-by-Country Memory-Optimized):
 1. Trains LightGBM on existing full training matrices (features_train.npy & labels_train.npy).
 2. For each country (France, India, US):
    a. Builds Inverted Index on Test S2 + S3.
-   b. Queries Top-12 candidates for Test S1 entities.
+   b. Queries Top-20 candidates for Test S1 entities.
    c. Builds text lookup for entities in this country.
-   d. Extracts RapidFuzz features in 100K-pair chunks.
-   e. Predicts match probabilities with LightGBM and applies optimal 0.88 threshold.
-   f. Frees all country-specific memory before moving to the next country.
-3. Writes formatted output/candidate_pairs.tsv and output/matching_results.tsv.
-4. Executes utils/validate_submission.py to guarantee submission compliance.
-5. Packages output/submission.zip ready for leaderboard upload.
+   d. Extracts 13 RapidFuzz features in 100K-pair chunks.
+   e. Predicts match probabilities with LightGBM.
+   f. Applies veto (zero proba for vetoed pairs) and writes above-threshold predictions.
+   g. Frees all country-specific memory before moving to the next country.
+3. Runs post_process.py for pool-side dedup (each S2/S3 maps to at most one S1).
+4. Writes formatted output/candidate_pairs.tsv and output/matching_results.tsv.
+5. Executes utils/validate_submission.py to guarantee submission compliance.
+6. Packages output/submission.zip ready for leaderboard upload.
 """
 
 import os
@@ -36,12 +38,26 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 sys.path.insert(0, SRC_DIR)
-from blocking import clean_text, build_combined_text, tokenize, build_inverted_index, query_index, read_filtered_tsv
-from features import compute_features_batch, _norm_str
+from blocking import clean_text, build_combined_text, tokenize, build_inverted_index, query_index, read_filtered_tsv, TOP_K
+from features import compute_features_batch, _norm_str, N_FEATURES
 
-TOP_K = 12
+# Use the threshold found by classifier.py's search; default to 0.88
+# This will be overridden if threshold_search.tsv exists
 OPTIMAL_THRESHOLD = 0.88
 CHUNK_SIZE = 100_000
+
+def load_best_threshold() -> float:
+    """Load the best threshold from threshold_search.tsv if available."""
+    thresh_path = os.path.join(OUTPUT_DIR, 'threshold_search.tsv')
+    if os.path.exists(thresh_path):
+        df = pd.read_csv(thresh_path, sep='\t')
+        best_idx = df['macro_f05'].idxmax()
+        best_thresh = df.loc[best_idx, 'threshold']
+        best_f05 = df.loc[best_idx, 'macro_f05']
+        log.info(f"Loaded best threshold from search: {best_thresh:.2f} (F0.5={best_f05:.4f})")
+        return float(best_thresh)
+    return OPTIMAL_THRESHOLD
+
 
 def main():
     t_start = time.time()
@@ -71,13 +87,24 @@ def main():
     y_train = np.load(lbl_train_path)
     log.info(f"Loaded X_train shape={X_train.shape}, y_train shape={y_train.shape} (positives: {(y_train==1).sum():,})")
 
-    clf = LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31, random_state=42, verbose=-1, n_jobs=-1)
+    # Use tuned hyperparameters matching classifier.py
+    clf = LGBMClassifier(
+        n_estimators=500, learning_rate=0.03, num_leaves=63,
+        min_child_samples=50, subsample=0.8, colsample_bytree=0.8,
+        reg_alpha=0.1, reg_lambda=1.0,
+        random_state=42, verbose=-1, n_jobs=-1
+    )
     t_train = time.time()
     clf.fit(X_train, y_train)
-    log.info(f"LightGBM trained successfully in {time.time() - t_train:.1f}s ✅")
+    log.info(f"LightGBM trained successfully in {time.time() - t_train:.1f}s ✅ ({clf.n_features_in_} features)")
     del X_train, y_train
     gc.collect()
 
+    # Load the best threshold from threshold search
+    threshold = load_best_threshold()
+    log.info(f"Using decision threshold: {threshold:.2f}")
+
+    # Predictions file for post-processing
     predictions_path = os.path.join(OUTPUT_DIR, 'raw_predictions.tsv')
     if os.path.exists(predictions_path):
         os.remove(predictions_path)
@@ -126,7 +153,7 @@ def main():
         del pool_c
         gc.collect()
 
-        # 2b. Candidate Retrieval
+        # 2b. Candidate Retrieval (uses TOP_K from blocking.py = 20)
         cands_country: list[tuple[str, str, int]] = []
         for row in sub_s1.itertuples(index=False):
             c_list = query_index(row.comb_text, index, idf, TOP_K)
@@ -165,22 +192,29 @@ def main():
         # 2d. Feature Extraction & Inference in Chunks
         log.info(f"[{country}] Extracting features & running LightGBM inference …")
         n_pairs = len(cands_country)
+        n_matched_country = 0
         for start in range(0, n_pairs, CHUNK_SIZE):
             chunk_slice = cands_country[start:start + CHUNK_SIZE]
             chunk_df = pd.DataFrame(chunk_slice, columns=['source1_entity_id', 'candidate_entity_id', 'blocking_rank'])
             
             X_chunk = compute_features_batch(chunk_df, lookup_country)
-            # Support both 8-feature (old) and 9-feature (new) models
-            if clf.n_features_ == 8:
-                proba_chunk = clf.predict_proba(X_chunk[:, :8])[:, 1].astype(np.float32)
+            
+            # Handle model trained with different feature counts
+            n_model_feats = clf.n_features_in_
+            if n_model_feats < X_chunk.shape[1]:
+                proba_chunk = clf.predict_proba(X_chunk[:, :n_model_feats])[:, 1].astype(np.float32)
             else:
                 proba_chunk = clf.predict_proba(X_chunk)[:, 1].astype(np.float32)
 
-            veto_mask = X_chunk[:, 8] == 1.0
-            proba_chunk[veto_mask] = 0.0
+            # Apply veto: if veto_flag == 1, force probability to 0
+            # veto_flag is at index 12 in the 13-feature layout
+            if X_chunk.shape[1] > 12:
+                veto_mask = X_chunk[:, 12] == 1.0
+                proba_chunk[veto_mask] = 0.0
 
-            # Filter candidates directly by threshold to save disk space
-            match_mask = proba_chunk >= OPTIMAL_THRESHOLD
+            # Save predictions above threshold for post-processing
+            match_mask = proba_chunk >= threshold
+            n_matched_country += match_mask.sum()
             valid_chunk = chunk_df[match_mask].copy()
             valid_chunk['probability'] = proba_chunk[match_mask]
             
@@ -196,7 +230,7 @@ def main():
         gc.collect()
 
         elapsed_c = time.time() - t_country
-        log.info(f"[{country}] Completed in {elapsed_c / 60:.1f} minutes ✅")
+        log.info(f"[{country}] Completed in {elapsed_c / 60:.1f} minutes ({n_matched_country:,} matches) ✅")
 
     # =========================================================================
     # STEP 3: WRITE FINAL OUTPUT TSV FILES
@@ -212,8 +246,8 @@ def main():
             f.write(f"{s1_id}\t{c_str}\n")
     log.info(f"Candidate pairs saved ({os.path.getsize(candidate_tsv_path) / (1024**2):.1f} MB) ✅")
 
-    # 3b. matching_results.tsv (singletons are left completely blank in 2nd column)
-    log.info("Running post_process.py to enforce bipartite 1-to-1 matching …")
+    # 3b. matching_results.tsv via post_process.py (pool-side dedup)
+    log.info("Running post_process.py for pool-side dedup …")
     
     s1_ids_path = os.path.join(OUTPUT_DIR, 's1_ids.txt')
     with open(s1_ids_path, 'w') as f:

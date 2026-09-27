@@ -2,8 +2,9 @@
 classifier.py — Stage 3: LightGBM Classifier
 Amazon Business Entity Resolution Challenge
 
-Loads pre-extracted train/val features, trains LightGBMClassifier, runs
-threshold search (0.50 → 0.88, step 0.02) and reports the best Macro F0.5.
+Loads pre-extracted train/val features, trains LightGBMClassifier with tuned
+hyperparameters, runs threshold search (0.50 → 0.96, step 0.01) and reports
+the best Macro F0.5.
 
 Usage:
     python classifier.py           # uses val_candidates_quick.tsv features
@@ -82,6 +83,7 @@ def build_preds_dict(
 if __name__ == '__main__':
     sys.path.insert(0, SRC_DIR)
     from metrics import load_ground_truth, compute_macro_f05
+    from features import FEATURE_NAMES
 
     gt_path = os.path.join(DATA_DIR, 'train_ground_truth.tsv')
 
@@ -106,26 +108,28 @@ if __name__ == '__main__':
     log.info(f"Train class balance — positives: {y_train.sum():,}  "
              f"negatives: {(y_train == 0).sum():,}")
 
-    # ---- 3. Train LightGBM -------------------------------------------------
-    log.info("=== Training LGBMClassifier ===")
+    # ---- 3. Train LightGBM (tuned for precision-heavy F0.5) ----------------
+    log.info("=== Training LGBMClassifier (tuned) ===")
     clf = LGBMClassifier(
-        n_estimators  = 300,
-        learning_rate = 0.05,
-        num_leaves    = 31,
+        n_estimators  = 500,          # more trees for better learning (was 300)
+        learning_rate = 0.03,         # slower learning for better generalization (was 0.05)
+        num_leaves    = 63,           # deeper trees (was 31)
+        max_depth     = -1,           # unlimited depth
+        min_child_samples = 50,       # prevent overfitting on small leaf groups
+        subsample     = 0.8,          # bagging for regularization
+        colsample_bytree = 0.8,       # feature subsampling
+        reg_alpha     = 0.1,          # L1 regularization
+        reg_lambda    = 1.0,          # L2 regularization
         random_state  = 42,
         n_jobs        = -1,
-        verbose       = -1,       # suppress LightGBM internal logs
+        verbose       = -1,           # suppress LightGBM internal logs
     )
     clf.fit(X_train, y_train)
     log.info("Training complete ✅")
 
-    # Feature importance
-    feat_names = [
-        'name_token_sort_ratio', 'name_jaro_winkler',
-        'address_token_set_ratio', 'address_levenshtein',
-        'number_overlap', 'len_diff_name', 'len_diff_addr',
-        'blocking_rank',
-    ]
+    # Feature importance (use dynamic names from features.py)
+    n_feats = X_train.shape[1]
+    feat_names = FEATURE_NAMES[:n_feats] if n_feats <= len(FEATURE_NAMES) else [f'f{i}' for i in range(n_feats)]
     importances = sorted(
         zip(feat_names, clf.feature_importances_),
         key=lambda x: -x[1]
@@ -145,9 +149,9 @@ if __name__ == '__main__':
     gt_val   = {k: v for k, v in gt_dict.items() if k in val_ids}
     log.info(f"GT entries for val set: {len(gt_val):,}")
 
-    # ---- 6. Threshold search -----------------------------------------------
-    log.info("=== Threshold search (0.50 → 0.88, step 0.02) ===")
-    thresholds = np.arange(0.50, 0.90, 0.02)
+    # ---- 6. Threshold search (wider range, finer step) --------------------
+    log.info("=== Threshold search (0.50 → 0.96, step 0.01) ===")
+    thresholds = np.arange(0.50, 0.97, 0.01)
 
     best_thresh = 0.50
     best_f05    = -1.0
@@ -157,10 +161,15 @@ if __name__ == '__main__':
         preds_dict = build_preds_dict(pairs_val, proba, float(thresh))
         f05 = compute_macro_f05(preds_dict, gt_val)
         results.append((thresh, f05))
-        log.info(f"  threshold={thresh:.2f}  Macro F0.5={f05:.4f}")
         if f05 > best_f05:
             best_f05    = f05
             best_thresh = thresh
+
+    # Print only every 5th result plus the best
+    for thresh, f05 in results:
+        if abs(thresh - best_thresh) < 0.005 or int(round(thresh * 100)) % 5 == 0:
+            marker = " <<<" if abs(thresh - best_thresh) < 0.005 else ""
+            log.info(f"  threshold={thresh:.2f}  Macro F0.5={f05:.4f}{marker}")
 
     # ---- 7. Report ----------------------------------------------------------
     log.info("=" * 55)

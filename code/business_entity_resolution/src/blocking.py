@@ -10,7 +10,7 @@ Strategy:
      (This replaces TF-IDF + cosine similarity, which required a ~5 GB dense
       matrix and repeatedly triggered the Linux OOM killer.)
   6. For each S1 entity, look up its tokens in the index, score candidates by
-     weighted token overlap (IDF-like: rarer tokens score higher), return top-12.
+     weighted token overlap (IDF-like: rarer tokens score higher), return top-20.
   7. Log candidate recall and average candidates per S1 entity on the val set.
 
 Memory profile (quick mode):  ~300-500 MB peak   (vs ~5-8 GB with TF-IDF)
@@ -85,6 +85,14 @@ def tokenize(text: str) -> list[str]:
     return [t for t in text.split() if len(t) >= 2]
 
 
+def char_ngrams(text: str, n: int = 3) -> list[str]:
+    """Generate character n-grams from text for fuzzy matching fallback."""
+    text = text.replace(' ', '')  # remove spaces for char n-grams
+    if len(text) < n:
+        return [text] if text else []
+    return [text[i:i+n] for i in range(len(text) - n + 1)]
+
+
 # ---------------------------------------------------------------------------
 # Chunked / memory-safe loader
 # ---------------------------------------------------------------------------
@@ -157,11 +165,12 @@ def query_index(
     """
     Score every candidate that shares ≥1 token with s1_text.
     Score = sum of IDF weights of shared tokens.
+    Uses up to 15 most discriminative tokens for better recall.
     """
     tokens = set(tokenize(s1_text))
-    # Focus on the most discriminative tokens (highest IDF) to prevent long scans on generic words
-    if len(tokens) > 10:
-        tokens = sorted(tokens, key=lambda t: idf.get(t, 0.0), reverse=True)[:10]
+    # Use more tokens (15 instead of 10) for better recall with top-20
+    if len(tokens) > 15:
+        tokens = sorted(tokens, key=lambda t: idf.get(t, 0.0), reverse=True)[:15]
 
     scores: dict[str, float] = collections.defaultdict(float)
     for tok in tokens:
