@@ -4,6 +4,7 @@ output/
 *.tsv
 *.csv
 *.tar.gz
+*.zip
 *.pkl
 
 # Python environment
