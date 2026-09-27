@@ -1,0 +1,21 @@
+# Ignore Data and Models
+data_processed/
+extracted_data/
+models/
+output/
+dataset/
+*.parquet
+*.tsv
+*.csv
+*.zip
+
+# Ignore Python specific
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+.coverage
+
+# Ignore VSCode / IDE
+.vscode/
+.idea/
