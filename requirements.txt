@@ -1,5 +1,10 @@
-pandas
-numpy
-scikit-learn
-lightgbm
-rapidfuzz
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.2.0
+lightgbm>=4.0.0
+rapidfuzz>=3.0.0
+polars>=1.40.0
+duckdb>=1.1.0
+scipy>=1.14.0
+joblib>=1.4.0
+tqdm>=4.65.0
