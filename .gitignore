@@ -1,3 +1,17 @@
+# Data and output files
 dataset/
 output/
+*.tsv
+*.csv
+*.tar.gz
+*.zip
+*.pkl
+
+# Python environment
 __pycache__/
+*.pyc
+.env
+venv/
+.vscode/
+.idea/
+6ab10eb3b23ba_student_resource/
